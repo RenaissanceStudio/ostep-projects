@@ -9,32 +9,35 @@
 #include <sys/stat.h>
 #include <errno.h>
 
+static int printable = 0;
+static const char delimit[] = " \t\v\r\n";
+#define RWRWRW (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
+
 static void print_error();
 static void run_cmd(char *path, char **cmds);
 static char **extract_params(char *str, int *p_cnt);
+static int dup2_ext(int fd1, int fd2);
 
-char *strerror(int error)
+int cmd_cd(char **params, int cnt);
+int cmd_exit(char **params, int cnt);
+int cmd_path(char **params, int cnt);
+
+const char *builtin_cmds[] = {
+    "cd",
+    "exit",
+    "path",
+};
+
+int builtin_len()
 {
-    static char mesg[30];
-
-    if (error >= 0 && error <= sys_nerr)
-        return ((char *)sys_errlist[error]);
-
-    sprintf(mesg, "Unknown error (%d)", error);
-    return (mesg);
+    return sizeof(builtin_cmds) / sizeof(char *);
 }
 
-int dup2_ext(int fd1, int fd2)
-{
-    int rc;
-
-    if ((rc = dup2(fd1, fd2)) < 0)
-        print_error();
-    return rc;
-}
-
-static int printable = 0;
-#define RWRWRW (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
+int (*builtin_func[])(char **args, int len) = {
+    cmd_cd,
+    cmd_exit,
+    cmd_path,
+};
 
 int main(int argc, char *argv[])
 {
@@ -75,7 +78,7 @@ int main(int argc, char *argv[])
         if (linelen == -1) // EOF
             exit(0);
 
-        if (line[strspn(line, " \t\v\r\n")] == '\0')
+        if (line[strspn(line, delimit)] == '\0')
             continue;
 
         // remove the '\n' if any
@@ -145,43 +148,17 @@ int main(int argc, char *argv[])
                 printf(">>> last param : %s\n", last_param);
         }
 
-        if (!strcmp("exit", cmd))
+        int status = 0;
+        for (i = 0; i < builtin_len(); i++)
         {
-            if (param_cnt > 1)
+            if (strcmp(cmd, builtin_cmds[i]) == 0)
             {
-                print_error();
-                continue;
+                status = builtin_func[i](out_params, param_cnt);
+                break;
             }
-            // should just match "exit"
-            exit(0);
         }
-
-        if (!strcmp("cd", cmd))
-        {
-            if (param_cnt != 2)
-                print_error();
-            else
-            {
-                int ret;
-                char *path = out_params[1];
-                if ((ret = chdir(path)) != 0)
-                {
-                    print_error();
-                    exit(1);
-                };
-            }
+        if (status == 1)
             continue;
-        }
-
-        if (!strcmp("path", cmd))
-        {
-            if (param_cnt > 1)
-                setenv("wish_path", out_params[1], 1);
-            else
-                setenv("wish_path", "", 1);
-
-            continue;
-        }
 
         // check unknown commands
         char buf[64], usr_buf[64], curr_buf[64];
@@ -243,6 +220,46 @@ int main(int argc, char *argv[])
     return 0;
 }
 
+int cmd_cd(char **params, int cnt)
+{
+    if (cnt != 2)
+    {
+        print_error();
+    }
+    else
+    {
+        int ret;
+        char *path = params[1];
+        if ((ret = chdir(path)) != 0)
+        {
+            print_error();
+            exit(1);
+        };
+    }
+    return 1;
+}
+
+int cmd_exit(char **params, int cnt)
+{
+    if (cnt > 1)
+    {
+        print_error();
+        return 1;
+    }
+    // exit matched
+    exit(0);
+    return 0;
+}
+
+int cmd_path(char **params, int cnt)
+{
+    if (cnt > 1)
+        setenv("wish_path", params[1], 1);
+    else
+        setenv("wish_path", "", 1);
+    return 1;
+}
+
 static void print_error()
 {
     char error_message[30] = "An error has occurred\n";
@@ -254,11 +271,19 @@ static void run_cmd(char *path, char **cmds)
     execv(path, cmds);
 }
 
+int dup2_ext(int fd1, int fd2)
+{
+    int rc;
+
+    if ((rc = dup2(fd1, fd2)) < 0)
+        print_error();
+    return rc;
+}
+
 static char **extract_params(char *str, int *p_cnt)
 {
     // https://stackoverflow.com/questions/11198604/c-split-string-into-an-array-of-strings
     char **res = NULL;
-    const char delimit[] = " \t\r\n"; //>
     char *p = strtok(str, delimit);
     int n_spaces = 0, i;
 
