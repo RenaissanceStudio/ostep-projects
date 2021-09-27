@@ -15,7 +15,7 @@ static const char delimit[] = " \t\v\r\n";
 
 static void print_error();
 static void run_cmd(char *path, char **cmds);
-static char **extract_params(char *str, int *p_cnt);
+static char **extract_params(char *str, int *p_cnt, const char *delimit);
 static int dup2_ext(int fd1, int fd2);
 
 int cmd_cd(char **params, int cnt);
@@ -38,6 +38,53 @@ int (*builtin_func[])(char **args, int len) = {
     cmd_exit,
     cmd_path,
 };
+
+pid_t r_wait(int *stat_loc)
+{
+    int ret;
+    while ((ret = wait(stat_loc)) == -1 && (errno == EINTR))
+        ;
+    return ret;
+}
+
+char *generate_cmd_path(char *cmd)
+{
+    char buf[64], usr_buf[64], curr_buf[64];
+    sprintf(buf, "%s%s", "/bin/", cmd);
+    sprintf(usr_buf, "%s%s", "/usr/bin/", cmd);
+
+    char *cmd_path;
+
+    char *my_path = getenv("wish_path");
+    if (my_path == NULL) // fallback with system path
+    {
+        if (!access(buf, X_OK))
+            cmd_path = buf;
+        else if (!access(usr_buf, X_OK))
+            cmd_path = usr_buf;
+        else if (!access(curr_buf, X_OK))
+            cmd_path = curr_buf;
+        else // No x premission ?
+        {
+            // fprintf(stderr, "Unknown command : %s", cmd);
+            print_error();
+            return NULL;
+        };
+    }
+    else
+    {
+        if (!strcmp("", my_path))
+        { // already set path to be empty, only 'built-in' commands allowed
+            print_error();
+            return NULL;
+        }
+
+        // use the overridden path
+        sprintf(curr_buf, "%s/%s", my_path, cmd);
+        cmd_path = curr_buf;
+    }
+    return strdup(cmd_path);
+}
 
 int main(int argc, char *argv[])
 {
@@ -87,10 +134,12 @@ int main(int argc, char *argv[])
         if (printable)
             printf(">>> line : %s | read len : %ld\n", line, linelen);
 
+        char *line_orgin = strdup(line);
+
         char *cmd;
         char **out_params = NULL;
         int param_cnt = 0;
-        out_params = extract_params(line, &param_cnt);
+        out_params = extract_params(line, &param_cnt, delimit);
 
         cmd = out_params[0];
         // printf("cmd: %s | len : %lu\n", cmd, strlen(cmd));
@@ -160,41 +209,48 @@ int main(int argc, char *argv[])
         if (status == 1)
             continue;
 
-        // check unknown commands
-        char buf[64], usr_buf[64], curr_buf[64];
-        sprintf(buf, "%s%s", "/bin/", cmd);
-        sprintf(usr_buf, "%s%s", "/usr/bin/", cmd);
+        if (!strcmp("&", cmd))
+            continue;
 
-        char *cmd_path;
-
-        char *my_path = getenv("wish_path");
-        if (my_path == NULL) // fallback with system path
+        int handled_sub_cmd = 0;
+        char *pt_and = strchr(line_orgin, '&');
+        if (pt_and != NULL)
         {
-            if (!access(buf, X_OK))
-                cmd_path = buf;
-            else if (!access(usr_buf, X_OK))
-                cmd_path = usr_buf;
-            else if (!access(curr_buf, X_OK))
-                cmd_path = curr_buf;
-            else // No x premission ?
+            int sub_index = 0;
+            int comb_len = 0;
+            char **sub_cmds = extract_params(line_orgin, &comb_len, " &");
+            for (sub_index = 0; sub_cmds[sub_index] != NULL; sub_index++)
             {
-                // fprintf(stderr, "Unknown command : %s", cmd);
-                print_error();
-                continue;
-            };
-        }
-        else
-        {
-            if (!strcmp("", my_path))
-            { // already set path to be empty, only 'built-in' commands allowed
-                print_error();
-                continue;
-            }
+                char *sub_cmd = sub_cmds[sub_index];
 
-            // use the overridden path
-            sprintf(curr_buf, "%s/%s", my_path, cmd);
-            cmd_path = curr_buf;
+                if (printable)
+                    printf(">>> sub cmd : %s\n", sub_cmd);
+
+                int rc = fork();
+                if (rc < 0)
+                {
+                    // fork failed; exit
+                    fprintf(stderr, "fork failed\n");
+                    exit(1);
+                }
+                else if (rc == 0)
+                {
+                    run_cmd(generate_cmd_path(sub_cmd), sub_cmds);
+                }
+                else
+                {
+                    handled_sub_cmd = 1;
+                    // wait for all the children
+                    while (r_wait(NULL) > 0)
+                        ;
+                }
+            }
         }
+
+        if (handled_sub_cmd)
+            continue;
+
+        char *cmd_path = generate_cmd_path(cmd);
 
         int rc = fork();
         if (rc < 0)
@@ -280,7 +336,7 @@ int dup2_ext(int fd1, int fd2)
     return rc;
 }
 
-static char **extract_params(char *str, int *p_cnt)
+static char **extract_params(char *str, int *p_cnt, const char *delimit)
 {
     // https://stackoverflow.com/questions/11198604/c-split-string-into-an-array-of-strings
     char **res = NULL;
