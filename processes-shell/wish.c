@@ -14,13 +14,20 @@ static const char delimit[] = " \t\v\r\n";
 #define RWRWRW (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 
 static void print_error();
+
 static void run_cmd(char *path, char **cmds);
+
 static char **extract_params(char *str, int *p_cnt, const char *delimit);
+
 static int dup2_ext(int fd1, int fd2);
 
 int cmd_cd(char **params, int cnt);
+
 int cmd_exit(char **params, int cnt);
+
 int cmd_path(char **params, int cnt);
+
+void redirect_to(const char *out_path_file);
 
 const char *builtin_cmds[] = {
     "cd",
@@ -49,6 +56,9 @@ pid_t r_wait(int *stat_loc)
 
 char *generate_cmd_path(char *cmd)
 {
+    while (*cmd == ' ')
+        cmd++;
+
     char buf[64], usr_buf[64], curr_buf[64];
     sprintf(buf, "%s%s", "/bin/", cmd);
     sprintf(usr_buf, "%s%s", "/usr/bin/", cmd);
@@ -80,8 +90,32 @@ char *generate_cmd_path(char *cmd)
         }
 
         // use the overridden path
-        sprintf(curr_buf, "%s/%s", my_path, cmd);
-        cmd_path = curr_buf;
+        if (printable)
+            printf(">>> extract custom paths : <<<\n");
+
+        int path_cnt;
+        char **paths = extract_params(strdup(my_path), &path_cnt, ":");
+        if (printable)
+            printf(">< path cnt : %d\n", path_cnt);
+
+        int i;
+        for (i = 0; i < path_cnt; i++)
+        {
+            char *path = paths[i];
+            if (path != NULL)
+            {
+                sprintf(curr_buf, "%s/%s", path, cmd);
+                if (!access(curr_buf, X_OK))
+                {
+                    cmd_path = curr_buf;
+                    break;
+                }
+            }
+        }
+        if (printable)
+        {
+            printf("cmd full path : %s\n", cmd_path);
+        }
     }
     return strdup(cmd_path);
 }
@@ -142,61 +176,37 @@ int main(int argc, char *argv[])
         out_params = extract_params(line, &param_cnt, delimit);
 
         cmd = out_params[0];
-        // printf("cmd: %s | len : %lu\n", cmd, strlen(cmd));
+
+        // process IO redirection
         int i;
         int redirect_pos = -1;
+        int parallel_pos = -1;
         for (i = 0; i < (param_cnt + 1); i++)
         {
-            if (out_params[i] != NULL && !strcmp(">", out_params[i]))
+            if (out_params[i] == NULL)
+                continue;
+            if (redirect_pos < 0 && !strcmp(">", out_params[i]))
             {
                 redirect_pos = i;
-                break;
+            }
+            char *parallel_sep = strchr(out_params[i], '&');
+            if (parallel_sep != NULL)
+            {
+                parallel_pos = i;
             }
         }
 
+        // PreCheck : cmd line with  a simple redirection
         if (redirect_pos > 0)
         {
-            if (redirect_pos != param_cnt - 2)
-            {
-                // output file is missing or invalid
+            if (parallel_pos < 0 && redirect_pos != param_cnt - 2)
+            { // error : output file is missing or invalid
                 print_error();
                 continue;
             }
         }
 
-        char *last_param = out_params[param_cnt - 1];
-        char *pt_redirect = NULL;
-        char *pt_out = NULL;
-        if ((pt_redirect = strchr(last_param, '>')) != NULL)
-        {
-            pt_out = pt_redirect + 1;
-            char outbuf[BUFSIZ];
-
-            int cnt = strlen(pt_out);
-            strncpy(outbuf, pt_out, cnt);
-            outbuf[cnt] = 0;
-
-            if (printable)
-                printf("out file : %s\n", outbuf);
-
-            int outfd;
-            umask(0);
-            if ((outfd = open(outbuf, O_RDWR | O_CREAT | O_TRUNC, RWRWRW)) < 0)
-            {
-                if (printable)
-                    printf("failed to open file %s : %s\n", outbuf, strerror(errno));
-                print_error();
-                exit(1);
-            }
-            dup2_ext(STDOUT_FILENO, outfd); // old, new
-            dup2_ext(STDERR_FILENO, outfd);
-
-            last_param[pt_redirect - last_param] = '\0';
-
-            if (printable)
-                printf(">>> last param : %s\n", last_param);
-        }
-
+        // built-in commands
         int status = 0;
         for (i = 0; i < builtin_len(); i++)
         {
@@ -212,17 +222,16 @@ int main(int argc, char *argv[])
         if (!strcmp("&", cmd))
             continue;
 
-        int handled_sub_cmd = 0;
-        char *pt_and = strchr(line_orgin, '&');
-        if (pt_and != NULL)
+        int sub_cmd_len = 0;
+        if (parallel_pos >= 0)
         {
-            int sub_index = 0;
-            int comb_len = 0;
-            char **sub_cmds = extract_params(line_orgin, &comb_len, " &");
-            for (sub_index = 0; sub_cmds[sub_index] != NULL; sub_index++)
+            char **sub_cmds = extract_params(line_orgin, &sub_cmd_len, "&");
+            if (printable)
+                printf("sub cmds len : %d\n", sub_cmd_len); // 3
+            int m = 0;
+            for (m = 0; m < sub_cmd_len; m++)
             {
-                char *sub_cmd = sub_cmds[sub_index];
-
+                char *sub_cmd = sub_cmds[m];
                 if (printable)
                     printf(">>> sub cmd : %s\n", sub_cmd);
 
@@ -235,24 +244,47 @@ int main(int argc, char *argv[])
                 }
                 else if (rc == 0)
                 {
-                    run_cmd(generate_cmd_path(sub_cmd), sub_cmds);
+                    // e.g. p5.sh > x.out
+                    int len = 0;
+                    char **sub_params = extract_params(strdup(sub_cmd), &len, " >");
+
+                    char *p_red = strchr(sub_cmd, '>');
+                    if (p_red != NULL)
+                    {
+                        redirect_to(sub_params[len - 1]);
+
+                        *p_red = '\0';
+                        free(sub_params);
+
+                        sub_params = extract_params(sub_cmd, &len, " ");
+                    }
+                    int i = 0;
+                    while (sub_params[i] != NULL)
+                    {
+                        if(printable) {
+                            printf("<<< sub cmds final ->: %s\n", sub_params[i]);
+                        }
+                        i++;
+                    }
+
+                    run_cmd(generate_cmd_path(sub_params[0]), sub_params);
                 }
                 else
                 {
-                    handled_sub_cmd = 1;
-                    // wait for all the children
-                    while (r_wait(NULL) > 0)
-                        ;
+                    continue;
                 }
             }
+            // wait for all the children
+            while (r_wait(NULL) > 0)
+                ;
+
+            continue;
         }
 
-        if (handled_sub_cmd)
-            continue;
-
+        int rc = 0;
         char *cmd_path = generate_cmd_path(cmd);
 
-        int rc = fork();
+        rc = fork();
         if (rc < 0)
         { // fork failed; exit
             fprintf(stderr, "fork failed\n");
@@ -260,10 +292,29 @@ int main(int argc, char *argv[])
         }
         else if (rc == 0)
         {
+            if (printable)
+                printf(">>> in child proc\n");
+
+            // e.g. ls tests/p2a-test>/tmp/output11
+            int j;
+            for (j = 1; j < param_cnt; j++)
+            {
+                int len = 0;
+                char *sub_cmd = out_params[j];
+                char *p_red = strchr(sub_cmd, '>');
+                if (p_red != NULL)
+                {
+                    char **sub_params = extract_params(strdup(sub_cmd), &len, " >");
+                    redirect_to(sub_params[len - 1]);
+
+                    *p_red = '\0'; // closing the cmd as redirecting IO completed
+                }
+            }
+
             run_cmd(strdup(cmd_path), out_params);
         }
         else
-        { // parent goes down this path (main)
+        {   // parent goes down this path (main)
             int rc_wait = wait(NULL);
             if (printable)
                 printf(">>> wait val - rc : %d\n", rc_wait);
@@ -274,6 +325,31 @@ int main(int argc, char *argv[])
     }
 
     return 0;
+}
+
+void redirect_to(const char *out_path_file)
+{
+    char outbuf[BUFSIZ];
+
+    int cnt = strlen(out_path_file);
+    strncpy(outbuf, out_path_file, cnt);
+    outbuf[cnt] = 0;
+
+    if (printable)
+        printf("redirect out file : %s\n", outbuf);
+
+    int outfd;
+    umask(0);
+    if ((outfd = open(outbuf, O_RDWR | O_CREAT | O_TRUNC, RWRWRW)) < 0)
+    {
+        if (printable)
+            printf("failed to open file %s : %s\n", outbuf, strerror(errno));
+        print_error();
+        exit(1);
+    }
+
+    dup2_ext(STDOUT_FILENO, outfd); // old, new
+    dup2_ext(STDERR_FILENO, outfd);
 }
 
 int cmd_cd(char **params, int cnt)
@@ -309,10 +385,33 @@ int cmd_exit(char **params, int cnt)
 
 int cmd_path(char **params, int cnt)
 {
+    char buf[BUFSIZ];
     if (cnt > 1)
-        setenv("wish_path", params[1], 1);
+    {
+        int read_cnt = 0;
+        int i = 1;
+        for (i = 1; i <= cnt; i++)
+        {
+            if (params[i] != NULL)
+            {
+                strcpy(buf + read_cnt, params[i]);
+                read_cnt += strlen(params[i]);
+                buf[read_cnt] = ':';
+                read_cnt++;
+            }
+        }
+        if (read_cnt > 0) // close the buf
+            buf[read_cnt - 1] = '\0';
+
+        if (printable)
+            printf(">>> set path : %s\n", buf);
+
+        setenv("wish_path", buf, 1);
+    }
     else
+    {
         setenv("wish_path", "", 1);
+    }
     return 1;
 }
 
@@ -336,6 +435,14 @@ int dup2_ext(int fd1, int fd2)
     return rc;
 }
 
+/***
+ * Extracts the sequential tokens in a null-terminated string
+ * 
+ * @param str source string
+ * @param p_cnt  valid param length excluding the 'NULL'
+ * @param delimit 
+ * @return an array of char*
+ */
 static char **extract_params(char *str, int *p_cnt, const char *delimit)
 {
     // https://stackoverflow.com/questions/11198604/c-split-string-into-an-array-of-strings
@@ -368,8 +475,10 @@ static char **extract_params(char *str, int *p_cnt, const char *delimit)
 
     if (printable)
     {
+        printf("{");
         for (i = 0; i < (n_spaces + 1); ++i)
-            printf("res[%d] = %s\n", i, res[i]);
+            printf("[%d]%s ", i, res[i]);
+        printf("}\n");
     }
 
     return res;
