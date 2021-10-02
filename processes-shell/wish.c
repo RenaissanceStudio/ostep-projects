@@ -1,5 +1,3 @@
-// WIP
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -13,13 +11,13 @@ static int printable = 0;
 static const char delimit[] = " \t\v\r\n";
 #define RWRWRW (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 
-static void print_error();
+void print_error();
 
-static void run_cmd(char *path, char **cmds);
+void run_cmd(char *path, char **cmds);
 
-static char **extract_params(char *str, int *p_cnt, const char *delimit);
+char **extract_params(char *str, int *p_cnt, const char *delimit);
 
-static int dup2_ext(int fd1, int fd2);
+int dup2_ext(int fd1, int fd2);
 
 int cmd_cd(char **params, int cnt);
 
@@ -28,6 +26,10 @@ int cmd_exit(char **params, int cnt);
 int cmd_path(char **params, int cnt);
 
 void redirect_to(const char *out_path_file);
+
+void fork_and_run(int with_prompt, char **out_params, int param_cnt);
+
+void fork_run_sub_commands(char *line);
 
 const char *builtin_cmds[] = {
     "cd",
@@ -150,9 +152,10 @@ int main(int argc, char *argv[])
 
     if (with_prompt)
         printf("wish> ");
+
     char *line = NULL;
-    size_t linecap = 0;
     ssize_t linelen;
+    size_t linecap = 0;
 
     while ((linelen = getline(&line, &linecap, in)) > 0)
     {
@@ -186,21 +189,18 @@ int main(int argc, char *argv[])
             if (out_params[i] == NULL)
                 continue;
             if (redirect_pos < 0 && !strcmp(">", out_params[i]))
-            {
                 redirect_pos = i;
-            }
+
             char *parallel_sep = strchr(out_params[i], '&');
             if (parallel_sep != NULL)
-            {
                 parallel_pos = i;
-            }
         }
 
         // PreCheck : cmd line with  a simple redirection
         if (redirect_pos > 0)
         {
             if (parallel_pos < 0 && redirect_pos != param_cnt - 2)
-            { // error : output file is missing or invalid
+            {   // error : output file is missing or invalid
                 print_error();
                 continue;
             }
@@ -222,109 +222,121 @@ int main(int argc, char *argv[])
         if (!strcmp("&", cmd))
             continue;
 
-        int sub_cmd_len = 0;
         if (parallel_pos >= 0)
         {
-            char **sub_cmds = extract_params(line_orgin, &sub_cmd_len, "&");
-            if (printable)
-                printf("sub cmds len : %d\n", sub_cmd_len); // 3
-            int m = 0;
-            for (m = 0; m < sub_cmd_len; m++)
-            {
-                char *sub_cmd = sub_cmds[m];
-                if (printable)
-                    printf(">>> sub cmd : %s\n", sub_cmd);
+            fork_run_sub_commands(line_orgin);
 
-                int rc = fork();
-                if (rc < 0)
-                {
-                    // fork failed; exit
-                    fprintf(stderr, "fork failed\n");
-                    exit(1);
-                }
-                else if (rc == 0)
-                {
-                    // e.g. p5.sh > x.out
-                    int len = 0;
-                    char **sub_params = extract_params(strdup(sub_cmd), &len, " >");
-
-                    char *p_red = strchr(sub_cmd, '>');
-                    if (p_red != NULL)
-                    {
-                        redirect_to(sub_params[len - 1]);
-
-                        *p_red = '\0';
-                        free(sub_params);
-
-                        sub_params = extract_params(sub_cmd, &len, " ");
-                    }
-                    int i = 0;
-                    while (sub_params[i] != NULL)
-                    {
-                        if(printable) {
-                            printf("<<< sub cmds final ->: %s\n", sub_params[i]);
-                        }
-                        i++;
-                    }
-
-                    run_cmd(generate_cmd_path(sub_params[0]), sub_params);
-                }
-                else
-                {
-                    continue;
-                }
-            }
             // wait for all the children
             while (r_wait(NULL) > 0)
                 ;
-
             continue;
         }
 
-        int rc = 0;
-        char *cmd_path = generate_cmd_path(cmd);
+        fork_and_run(with_prompt, out_params, param_cnt);
+    }
 
-        rc = fork();
+    return 0;
+}
+
+void fork_run_sub_commands(char *line)
+{
+    int sub_cmd_len = 0;
+    char **sub_cmds = extract_params(line, &sub_cmd_len, "&");
+    if (printable)
+        printf("sub cmds len : %d\n", sub_cmd_len); // 3
+    int m = 0;
+    for (m = 0; m < sub_cmd_len; m++)
+    {
+        char *sub_cmd = sub_cmds[m];
+        if (printable)
+            printf(">>> sub cmd : %s\n", sub_cmd);
+
+        int rc = fork();
         if (rc < 0)
-        { // fork failed; exit
+        {
+            // fork failed; exit
             fprintf(stderr, "fork failed\n");
             exit(1);
         }
         else if (rc == 0)
         {
-            if (printable)
-                printf(">>> in child proc\n");
+            // e.g. p5.sh > x.out
+            int len = 0;
+            char **sub_params = extract_params(strdup(sub_cmd), &len, " >");
 
-            // e.g. ls tests/p2a-test>/tmp/output11
-            int j;
-            for (j = 1; j < param_cnt; j++)
+            char *p_red = strchr(sub_cmd, '>');
+            if (p_red != NULL)
             {
-                int len = 0;
-                char *sub_cmd = out_params[j];
-                char *p_red = strchr(sub_cmd, '>');
-                if (p_red != NULL)
-                {
-                    char **sub_params = extract_params(strdup(sub_cmd), &len, " >");
-                    redirect_to(sub_params[len - 1]);
+                redirect_to(sub_params[len - 1]);
 
-                    *p_red = '\0'; // closing the cmd as redirecting IO completed
+                *p_red = '\0';
+                free(sub_params);
+
+                sub_params = extract_params(sub_cmd, &len, " ");
+            }
+            int i = 0;
+            while (sub_params[i] != NULL)
+            {
+                if (printable)
+                {
+                    printf("<<< sub cmds final ->: %s\n", sub_params[i]);
                 }
+                i++;
             }
 
-            run_cmd(strdup(cmd_path), out_params);
+            run_cmd(generate_cmd_path(sub_params[0]), sub_params);
         }
         else
-        {   // parent goes down this path (main)
-            int rc_wait = wait(NULL);
-            if (printable)
-                printf(">>> wait val - rc : %d\n", rc_wait);
-
-            if (with_prompt)
-                printf("wish> ");
+        {
+            continue;
         }
     }
+}
 
-    return 0;
+void fork_and_run(int with_prompt, char **out_params, int param_cnt)
+{
+    int rc = 0;
+    char *cmd = out_params[0];
+    char *cmd_path = generate_cmd_path(cmd);
+
+    rc = fork();
+    if (rc < 0)
+    { // fork failed; exit
+        fprintf(stderr, "fork failed\n");
+        exit(1);
+    }
+    else if (rc == 0)
+    {
+        if (printable)
+            printf(">>> in child proc\n");
+
+        // e.g. ls tests/p2a-test>/tmp/output11
+        int j;
+        for (j = 1; j < param_cnt; j++)
+        {
+            int len = 0;
+            char *sub_cmd = out_params[j];
+            char *p_red = strchr(sub_cmd, '>');
+            if (p_red != NULL)
+            {
+                char **sub_params = extract_params(strdup(sub_cmd), &len, " >");
+                redirect_to(sub_params[len - 1]);
+
+                *p_red = '\0'; // closing the cmd as redirecting IO completed
+            }
+        }
+
+        run_cmd(strdup(cmd_path), out_params);
+    }
+    else
+    {   // parent goes down this path (main)
+        int rc_wait = wait(NULL);
+        if (printable)
+            printf(">>> wait val - rc : %d\n", rc_wait);
+
+        if (with_prompt)
+            printf("wish> ");
+    }
 }
 
 void redirect_to(const char *out_path_file)
@@ -348,8 +360,11 @@ void redirect_to(const char *out_path_file)
         exit(1);
     }
 
-    dup2_ext(STDOUT_FILENO, outfd); // old, new
-    dup2_ext(STDERR_FILENO, outfd);
+    // duplicate output file to stdout
+    dup2_ext(outfd, STDOUT_FILENO);
+
+    // duplicate output file to stderr
+    dup2_ext(outfd, STDERR_FILENO);
 }
 
 int cmd_cd(char **params, int cnt)
@@ -415,21 +430,23 @@ int cmd_path(char **params, int cnt)
     return 1;
 }
 
-static void print_error()
+void print_error()
 {
     char error_message[30] = "An error has occurred\n";
     write(STDERR_FILENO, error_message, strlen(error_message));
 }
 
-static void run_cmd(char *path, char **cmds)
+void run_cmd(char *path, char **cmds)
 {
     execv(path, cmds);
 }
 
 int dup2_ext(int fd1, int fd2)
 {
-    int rc;
+    if (fd1 == fd2)
+        return fd2;
 
+    int rc;
     if ((rc = dup2(fd1, fd2)) < 0)
         print_error();
     return rc;
@@ -437,13 +454,13 @@ int dup2_ext(int fd1, int fd2)
 
 /***
  * Extracts the sequential tokens in a null-terminated string
- * 
+ *
  * @param str source string
  * @param p_cnt  valid param length excluding the 'NULL'
- * @param delimit 
+ * @param delimit
  * @return an array of char*
  */
-static char **extract_params(char *str, int *p_cnt, const char *delimit)
+char **extract_params(char *str, int *p_cnt, const char *delimit)
 {
     // https://stackoverflow.com/questions/11198604/c-split-string-into-an-array-of-strings
     char **res = NULL;
