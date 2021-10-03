@@ -15,7 +15,7 @@ void print_error();
 
 void run_cmd(char *path, char **cmds);
 
-char **extract_params(char *str, int *p_cnt, const char *delimit);
+char **extract_params(const char *str, int *p_cnt, const char *delimit);
 
 int dup2_ext(int fd1, int fd2);
 
@@ -96,7 +96,7 @@ char *generate_cmd_path(char *cmd)
             printf(">>> extract custom paths : <<<\n");
 
         int path_cnt;
-        char **paths = extract_params(strdup(my_path), &path_cnt, ":");
+        char **paths = extract_params(my_path, &path_cnt, ":");
         if (printable)
             printf(">< path cnt : %d\n", path_cnt);
 
@@ -200,7 +200,7 @@ int main(int argc, char *argv[])
         if (redirect_pos > 0)
         {
             if (parallel_pos < 0 && redirect_pos != param_cnt - 2)
-            {   // error : output file is missing or invalid
+            { // error : output file is missing or invalid
                 print_error();
                 continue;
             }
@@ -262,7 +262,7 @@ void fork_run_sub_commands(char *line)
         {
             // e.g. p5.sh > x.out
             int len = 0;
-            char **sub_params = extract_params(strdup(sub_cmd), &len, " >");
+            char **sub_params = extract_params(sub_cmd, &len, " >");
 
             char *p_red = strchr(sub_cmd, '>');
             if (p_red != NULL)
@@ -319,7 +319,7 @@ void fork_and_run(int with_prompt, char **out_params, int param_cnt)
             char *p_red = strchr(sub_cmd, '>');
             if (p_red != NULL)
             {
-                char **sub_params = extract_params(strdup(sub_cmd), &len, " >");
+                char **sub_params = extract_params(sub_cmd, &len, " >");
                 redirect_to(sub_params[len - 1]);
 
                 *p_red = '\0'; // closing the cmd as redirecting IO completed
@@ -329,7 +329,7 @@ void fork_and_run(int with_prompt, char **out_params, int param_cnt)
         run_cmd(strdup(cmd_path), out_params);
     }
     else
-    {   // parent goes down this path (main)
+    { // parent goes down this path (main)
         int rc_wait = wait(NULL);
         if (printable)
             printf(">>> wait val - rc : %d\n", rc_wait);
@@ -460,12 +460,30 @@ int dup2_ext(int fd1, int fd2)
  * @param delimit
  * @return an array of char*
  */
-char **extract_params(char *str, int *p_cnt, const char *delimit)
+char **extract_params(const char *str, int *p_cnt, const char *delimit)
 {
+    if (str == NULL || delimit == NULL)
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    char *t;
+    const char *newstr;
+
+    newstr = str + strspn(str, delimit); // skip the intial delimits if any
+    if ((t = malloc(strlen(newstr) + 1)) == NULL)
+        exit(-1);
+
+    strcpy(t, newstr);
+
     // https://stackoverflow.com/questions/11198604/c-split-string-into-an-array-of-strings
     char **res = NULL;
-    char *p = strtok(str, delimit);
+    char *p = strtok(t, delimit);
     int n_spaces = 0, i;
+
+    if (p == NULL)
+        free(t);
 
     /* split string and append tokens to 'res' */
 
