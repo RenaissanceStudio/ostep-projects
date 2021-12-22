@@ -3,7 +3,12 @@
 # To remove files, type "make clean"
 
 CC = gcc
-CFLAGS = -Wall
+CFLAGS = -Wall -I./include -pthread
+OS     := $(shell uname -s)
+LIBS   :=
+ifeq ($(OS),Linux)
+	LIBS += -pthread
+endif
 OBJS = wserver.o wclient.o request.o io_helper.o 
 
 .SUFFIXES: .c .o 
