@@ -6,8 +6,6 @@
 // Hopefully this is not a problem ... :)
 //
 
-#define MAXBUF (8192)
-
 void request_error(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg) {
     char buf[MAXBUF], body[MAXBUF];
 
@@ -93,7 +91,11 @@ void request_get_filetype(char *filename, char *filetype) {
         strcpy(filetype, "text/plain");
 }
 
-void request_serve_dynamic(int fd, char *filename, char *cgiargs) {
+void request_serve_dynamic(request_t **request, void (*cleanup)(request_t **req)) {
+    int fd = (*request)->fd;
+    char *filename = (*request)->filename;
+    char *cgiargs = (*request)->cgiargs;
+
     char buf[MAXBUF], *argv[] = {NULL};
 
     // The server does only a little bit of the header.  
@@ -111,6 +113,7 @@ void request_serve_dynamic(int fd, char *filename, char *cgiargs) {
         execve_or_die(filename, argv, environ);
     } else {
         wait_or_die(NULL);
+        cleanup(request);
     }
 }
 
@@ -141,8 +144,52 @@ void request_serve_static(int fd, char *filename, int filesize) {
     munmap_or_die(srcp, filesize);
 }
 
+request_t *generate_request(int fd, char *filename, int is_static, char *args, int size) {
+    request_t *pt = (request_t *) malloc(sizeof(request_t));
+    if (!pt) {
+        perror("failed to allocate memory for request\n");
+        exit(1);
+    }
+
+    pt->fd = fd;
+    pt->filename = strdup(filename);
+    pt->static_type = is_static;
+    pt->cgiargs = args == NULL ? NULL : strdup(args);
+    pt->filesize = size;
+
+    return pt;
+}
+
+void free_res_ext(request_t *req, int fd_kept) {
+    if (fd_kept == 0) {
+        printf(">>> free request with fd : %d ...\n", req->fd);
+        close_or_die(req->fd);
+    }
+
+    if (req->filename) {
+        free(req->filename);
+        req->filename = NULL;
+    }
+    if (req->cgiargs) {
+        free(req->cgiargs);
+        req->cgiargs = NULL;
+    }
+
+    free(req);
+    req = NULL;
+}
+
+void free_res(request_t *req) {
+    free_res_ext(req, 0);
+}
+
+void free_res_dyna(request_t **req) {
+    free_res(*req);
+    free(req);
+}
+
 // handle a request
-void request_handle(int fd) {
+void request_handle(int fd, void (*func)(request_t *request_pt)) {
     int is_static;
     struct stat sbuf;
     char buf[MAXBUF], method[MAXBUF], uri[MAXBUF], version[MAXBUF];
@@ -169,12 +216,13 @@ void request_handle(int fd) {
             request_error(fd, filename, "403", "Forbidden", "server could not read this file");
             return;
         }
-        request_serve_static(fd, filename, sbuf.st_size);
+
+        func(generate_request(fd, filename, 1, NULL, sbuf.st_size));
     } else {
         if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
             request_error(fd, filename, "403", "Forbidden", "server could not run this CGI program");
             return;
         }
-        request_serve_dynamic(fd, filename, cgiargs);
+        func(generate_request(fd, filename, 0, cgiargs, 0));
     }
 }
