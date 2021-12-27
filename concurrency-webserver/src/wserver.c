@@ -139,7 +139,7 @@ void *handle_request(void *args) {
                 exit(1);
             }
 
-            *ppt = generate_request(fd->fd, strdup(fd->filename), 0, strdup(fd->cgiargs), fd->filesize);
+            *ppt = generate_request(fd->fd, fd->filename, 0, fd->cgiargs, fd->filesize);
             // keep the connected fd to the very end
             free_res_ext(fd, 1);
 
